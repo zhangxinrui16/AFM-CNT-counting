@@ -18,6 +18,7 @@ pip install -r requirements.txt
 ```bash
 streamlit run app.py
 ```
+If you accidentally run `python app.py`, the script now delegates to `streamlit run` automatically to avoid the missing `ScriptRunContext` warning.
 1. Upload an AFM height-channel image (png/jpg/tiff).
 2. Enter scan length (μm) and optional width (defaults to length).
 3. View detected CNT overlays and computed density (tubes per μm²).
