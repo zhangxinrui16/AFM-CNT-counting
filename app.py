@@ -134,11 +134,12 @@ def ridge_enhance(image: Array2D) -> Array2D:
 
 def threshold_ridges(ridge_map: Array2D) -> Array2D:
     thresh = filters.threshold_otsu(ridge_map)
-    relaxed = max(thresh * 0.82, ridge_map.mean() + ridge_map.std() * 0.08)
+    relaxed = max(thresh * 0.9, ridge_map.mean() + ridge_map.std() * 0.12)
     mask = ridge_map > relaxed
-    clean = morphology.binary_closing(mask, morphology.disk(1))
-    clean = morphology.remove_small_objects(clean, min_size=6)
-    clean = morphology.remove_small_holes(clean, area_threshold=12)
+    clean = morphology.binary_opening(mask, morphology.disk(1))
+    clean = morphology.binary_closing(clean, morphology.disk(1))
+    clean = morphology.remove_small_objects(clean, min_size=12)
+    clean = morphology.remove_small_holes(clean, area_threshold=20)
     return clean
 
 
@@ -237,6 +238,14 @@ def extract_segments(graph: nx.Graph) -> List[List[Tuple[int, int]]]:
     return segments
 
 
+def prune_short_segments(segments: List[List[Tuple[int, int]]], min_len: int = 15) -> List[List[Tuple[int, int]]]:
+    filtered: List[List[Tuple[int, int]]] = []
+    for seg in segments:
+        if len(seg) >= min_len:
+            filtered.append(seg)
+    return filtered
+
+
 def segment_direction(segment: List[Tuple[int, int]], anchor_index: int = 0) -> np.ndarray:
     if len(segment) < 2:
         return np.array([0.0, 0.0])
@@ -294,6 +303,7 @@ def merge_segments_by_orientation(segments: List[List[Tuple[int, int]]], angle_t
 def count_tubes(skeleton: Array2D):
     graph = build_graph(skeleton)
     segments = extract_segments(graph)
+    segments = prune_short_segments(segments)
     merged_groups = merge_segments_by_orientation(segments)
     return merged_groups, segments
 
