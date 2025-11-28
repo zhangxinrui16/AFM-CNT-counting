@@ -20,6 +20,35 @@ def load_grayscale(image: Image.Image) -> Array2D:
     return arr
 
 
+def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
+    """Automatically crop away outer text/legend margins.
+
+    The AFM scan typically occupies a central rectangle, while scale bars or
+    annotations live near the borders. We detect the high-variance band of rows
+    and columns and keep only their bounding box.
+    """
+
+    norm = image / 255.0 if image.max() > 1 else image
+    blurred = filters.gaussian(norm, sigma=1.0)
+    row_activity = np.std(blurred, axis=1)
+    col_activity = np.std(blurred, axis=0)
+
+    def active_bounds(profile: Array2D) -> Tuple[int, int]:
+        # Use a robust threshold to tolerate bright legends while retaining the
+        # high-variance scan area. Fallback to full span if detection fails.
+        thresh = max(np.percentile(profile, 60) * 0.6, profile.max() * 0.08)
+        active = np.where(profile > thresh)[0]
+        if len(active) == 0:
+            return 0, len(profile)
+        return int(active[0]), int(active[-1] + 1)
+
+    top, bottom = active_bounds(row_activity)
+    left, right = active_bounds(col_activity)
+
+    cropped = image[top:bottom, left:right]
+    return cropped, (slice(top, bottom), slice(left, right))
+
+
 def preprocess(image: Array2D) -> Array2D:
     rescaled = exposure.rescale_intensity(
         image,
@@ -269,13 +298,14 @@ def visualize_detection(
 
 def process_image(uploaded: Image.Image):
     grayscale = load_grayscale(uploaded)
-    pre = preprocess(grayscale)
+    cropped, _ = crop_afm_region(grayscale)
+    pre = preprocess(cropped)
     ridges = ridge_enhance(pre)
     mask = threshold_ridges(ridges)
     bridged = connect_gaps(mask)
     skeleton = morphology.skeletonize(bridged)
     groups, segments = count_tubes(skeleton)
-    return grayscale, skeleton, groups, segments
+    return cropped, skeleton, groups, segments
 
 
 def running_in_streamlit() -> bool:
@@ -309,8 +339,10 @@ def main():
         return
 
     image = Image.open(uploaded_file)
-    grayscale, skeleton, groups, segments = process_image(image)
-    display_gray = np.clip(grayscale / 255.0 if grayscale.max() > 1 else grayscale, 0.0, 1.0)
+    cropped_gray, skeleton, groups, segments = process_image(image)
+    display_crop = np.clip(
+        cropped_gray / 255.0 if cropped_gray.max() > 1 else cropped_gray, 0.0, 1.0
+    )
 
     area = length_um * width_um
     tube_count = len(groups)
@@ -318,13 +350,13 @@ def main():
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("原始灰度图")
-        st.image(display_gray, caption="输入图像灰度", use_container_width=True)
+        st.subheader("裁剪后的AFM区域")
+        st.image(display_crop, caption="已去除边缘文字", use_container_width=True)
         st.markdown(
             f"**面积：** {area:.3f} μm²  |  **根数：** {tube_count}  |  **密度：** {density:.2f} 根/μm²"
         )
     with col2:
-        fig = visualize_detection(grayscale, skeleton, groups, segments)
+        fig = visualize_detection(cropped_gray, skeleton, groups, segments)
         st.subheader("检测结果")
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
