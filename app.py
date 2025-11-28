@@ -1,10 +1,8 @@
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-import plotly.graph_objects as go
 from PIL import Image
 import streamlit as st
 from streamlit.web import cli as stcli
@@ -30,28 +28,78 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
 
     norm = image / 255.0 if image.max() > 1 else image
 
-    # Use high-frequency energy + gradient to highlight textured scan regions
-    # while keeping legend text (narrow, low-area) suppressed.
+    # Use high-frequency energy + gradient to highlight the textured AFM scan.
     highpass = norm - filters.gaussian(norm, sigma=2.5)
     energy = np.abs(highpass) + filters.sobel(norm)
     energy = exposure.rescale_intensity(energy, out_range=(0.0, 1.0))
 
-    thresh = max(np.percentile(energy, 75), energy.mean() + energy.std() * 0.5)
+    def longest_active_run(profile: Array2D) -> Tuple[int, int]:
+        smooth = filters.gaussian(profile, sigma=3.0)
+        thresh = smooth.mean() + smooth.std() * 0.2
+        active = smooth > thresh
+        best = (0, len(profile))
+        best_len = 0
+        start = None
+        for idx, val in enumerate(active):
+            if val and start is None:
+                start = idx
+            if not val and start is not None:
+                length = idx - start
+                if length > best_len:
+                    best_len = length
+                    best = (start, idx)
+                start = None
+        if start is not None:
+            length = len(active) - start
+            if length > best_len:
+                best = (start, len(active))
+        return best
+
+    row_band = longest_active_run(np.mean(energy, axis=1))
+    col_band = longest_active_run(np.mean(energy, axis=0))
+    top, bottom = row_band
+    left, right = col_band
+
+    thresh = max(np.percentile(energy, 70), energy.mean() + energy.std() * 0.5)
     mask = energy > thresh
     mask = morphology.binary_closing(mask, morphology.disk(3))
+    mask = morphology.binary_opening(mask, morphology.disk(2))
     mask = morphology.remove_small_objects(mask, min_size=int(image.size * 0.005))
     mask = morphology.remove_small_holes(mask, area_threshold=int(image.size * 0.01))
 
-    labels = measure.label(mask)
+    region_mask = mask[top:bottom, left:right]
+    labels = measure.label(region_mask)
     regions = measure.regionprops(labels)
     if regions:
         main = max(regions, key=lambda r: r.area)
         minr, minc, maxr, maxc = main.bbox
         pad = 4
-        top = max(0, minr - pad)
-        bottom = min(image.shape[0], maxr + pad)
-        left = max(0, minc - pad)
-        right = min(image.shape[1], maxc + pad)
+        top = max(0, top + minr - pad)
+        bottom = min(image.shape[0], top + maxr + pad)
+        left = max(0, left + minc - pad)
+        right = min(image.shape[1], left + maxc + pad)
+
+        refined = mask[top:bottom, left:right]
+        row_fill = refined.sum(axis=1) / refined.shape[1]
+        col_fill = refined.sum(axis=0) / refined.shape[0]
+
+        def trim_bounds(fill_profile: Array2D, start: int, end: int) -> Tuple[int, int]:
+            if fill_profile.max() == 0:
+                return start, end
+            cutoff = fill_profile.max() * 0.25
+            while start < end and fill_profile[start] < cutoff:
+                start += 1
+            while end > start and fill_profile[end - 1] < cutoff:
+                end -= 1
+            return start, end
+
+        top_trim, bottom_trim = trim_bounds(row_fill, 0, len(row_fill))
+        left_trim, right_trim = trim_bounds(col_fill, 0, len(col_fill))
+
+        top += top_trim
+        bottom = top + (bottom_trim - top_trim)
+        left += left_trim
+        right = left + (right_trim - left_trim)
     else:
         # Fallback: retain original heuristic bounds if no component is found
         blurred = filters.gaussian(norm, sigma=1.0)
@@ -67,6 +115,9 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
 
         top, bottom = active_bounds(row_activity)
         left, right = active_bounds(col_activity)
+
+    if bottom - top < 5 or right - left < 5:
+        top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
 
     cropped = image[top:bottom, left:right]
     return cropped, (slice(top, bottom), slice(left, right))
@@ -255,68 +306,23 @@ def visualize_detection(
     image: Array2D, skeleton: Array2D, groups: List[List[int]], segments: List[List[Tuple[int, int]]]
 ):
     base = exposure.rescale_intensity(image, out_range=(0.0, 1.0))
+    overlay = np.stack([base] * 3, axis=-1)
     colors = plt.cm.get_cmap("tab20", len(groups) + 1)
 
-    # Plotly's Image trace expects a colormodel from an explicit channel array; expand grayscale to RGB
-    base_rgb = np.stack([base] * 3, axis=-1)
-    base_uint8 = (base_rgb * 255).astype(np.uint8)
-
-    fig = go.Figure()
-    # 使用 px.imshow 风格的底图以确保像素坐标与散点一致
-    fig.add_trace(
-        go.Image(
-            z=base_uint8,
-            colormodel="rgb",
-            hoverinfo="skip",
-            name="AFM",
-            opacity=0.9,
-        )
-    )
-
     for gid, seg_indices in enumerate(groups):
-        xs: List[float] = []
-        ys: List[float] = []
+        tube_mask = np.zeros_like(image, dtype=bool)
         for idx in seg_indices:
             seg = segments[idx]
-            if len(seg) == 0:
-                continue
-            ys.extend([p[0] for p in seg])
-            xs.extend([p[1] for p in seg])
-            ys.append(np.nan)
-            xs.append(np.nan)
-
-        if not xs:
+            for y, x in seg:
+                tube_mask[y, x] = True
+        if not tube_mask.any():
             continue
 
-        rgb_vals = [int(v) for v in np.round(np.array(colors(gid)[:3]) * 255)]
-        color_str = f"rgb({rgb_vals[0]},{rgb_vals[1]},{rgb_vals[2]})"
-        fig.add_trace(
-            go.Scattergl(
-                x=xs,
-                y=ys,
-                mode="lines+markers",
-                line=dict(color=color_str, width=4),
-                marker=dict(color=color_str, size=6, line=dict(width=1, color="white")),
-                hovertemplate="<b>碳纳米管 %{customdata}</b><extra></extra>",
-                name=f"Tube {gid + 1}",
-                customdata=np.full(len(xs), gid + 1),
-                hoverlabel=dict(bgcolor=color_str, font=dict(color="white")),
-                opacity=0.95,
-            )
-        )
+        tube_mask = morphology.dilation(tube_mask, morphology.disk(1))
+        color = np.array(colors(gid)[:3])
+        overlay[tube_mask] = overlay[tube_mask] * 0.35 + color * 0.65
 
-    fig.update_layout(
-        title="检测结果（悬停高亮单根碳纳米管）",
-        margin=dict(l=0, r=0, t=40, b=0),
-        hovermode="closest",
-        xaxis=dict(showgrid=False, visible=False, constrain="domain"),
-        yaxis=dict(showgrid=False, visible=False, scaleanchor="x", autorange="reversed"),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-
-    fig.update_traces(hoverinfo="text")
-    return fig
+    return np.clip(overlay, 0.0, 1.0)
 
 
 def process_image(uploaded: Image.Image):
@@ -379,9 +385,9 @@ def main():
             f"**面积：** {area:.3f} μm²  |  **根数：** {tube_count}  |  **密度：** {density:.2f} 根/μm²"
         )
     with col2:
-        fig = visualize_detection(cropped_gray, skeleton, groups, segments)
+        overlay = visualize_detection(cropped_gray, skeleton, groups, segments)
         st.subheader("检测结果")
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+        st.image(overlay, caption="彩色标注的碳纳米管", use_container_width=True)
 
     with st.expander("算法要点"):
         st.markdown(
