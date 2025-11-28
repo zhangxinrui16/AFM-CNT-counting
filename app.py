@@ -7,6 +7,7 @@ import networkx as nx
 import numpy as np
 from PIL import Image
 import streamlit as st
+from streamlit.web import cli as stcli
 from skimage import exposure, filters, morphology, util
 from skimage.draw import line as draw_line
 
@@ -280,4 +281,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Running "python app.py" lacks Streamlit's ScriptRunContext and causes warnings.
+    # Delegate to "streamlit run" when needed to bootstrap the runtime cleanly.
+    import sys
+
+    if st._is_running_with_streamlit:
+        main()
+    else:
+        sys.argv = ["streamlit", "run", sys.argv[0]]
+        sys.exit(stcli.main())
