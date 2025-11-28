@@ -21,79 +21,54 @@ def load_grayscale(image: Image.Image) -> Array2D:
 def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     """Automatically crop away outer text/legend margins.
 
-    The AFM scan typically occupies a central rectangle, while scale bars or
-    annotations live near the borders. We detect the high-variance band of rows
-    and columns and keep only their bounding box.
+    The AFM scan typically sits inside a bright rectangular background with
+    legends along the edges. We locate the largest non-white region enclosed by
+    the bright frame (with a high-frequency rescue for faint scans) and crop to
+    that rectangle.
     """
 
     norm = image / 255.0 if image.max() > 1 else image
 
-    # Use high-frequency energy + gradient to highlight the textured AFM scan.
-    highpass = norm - filters.gaussian(norm, sigma=2.5)
+    # Detect the darkest non-white content as the AFM scan and keep its rectangle.
+    smooth = filters.gaussian(norm, sigma=1.0)
+    content_mask = smooth < 0.94
+    content_mask = morphology.binary_closing(content_mask, morphology.disk(2))
+    content_mask = morphology.remove_small_objects(content_mask, min_size=int(image.size * 0.002))
+    content_mask = morphology.remove_small_holes(content_mask, area_threshold=int(image.size * 0.004))
+
+    # Use high-frequency energy to rescue faint scans that are close to white.
+    highpass = norm - filters.gaussian(norm, sigma=2.0)
     energy = np.abs(highpass) + filters.sobel(norm)
     energy = exposure.rescale_intensity(energy, out_range=(0.0, 1.0))
+    energy_mask = energy > (energy.mean() + energy.std() * 0.25)
 
-    def longest_active_run(profile: Array2D) -> Tuple[int, int]:
-        smooth = filters.gaussian(profile, sigma=3.0)
-        thresh = smooth.mean() + smooth.std() * 0.2
-        active = smooth > thresh
-        best = (0, len(profile))
-        best_len = 0
-        start = None
-        for idx, val in enumerate(active):
-            if val and start is None:
-                start = idx
-            if not val and start is not None:
-                length = idx - start
-                if length > best_len:
-                    best_len = length
-                    best = (start, idx)
-                start = None
-        if start is not None:
-            length = len(active) - start
-            if length > best_len:
-                best = (start, len(active))
-        return best
+    combined = morphology.binary_dilation(content_mask | energy_mask, morphology.disk(2))
+    combined = morphology.remove_small_objects(combined, min_size=int(image.size * 0.003))
 
-    row_band = longest_active_run(np.mean(energy, axis=1))
-    col_band = longest_active_run(np.mean(energy, axis=0))
-    top, bottom = row_band
-    left, right = col_band
-
-    thresh = energy.mean() + energy.std() * 0.3
-    thresh = min(thresh, np.percentile(energy, 75))
-    mask = energy > thresh
-    mask = morphology.binary_closing(mask, morphology.disk(3))
-    mask = morphology.remove_small_objects(mask, min_size=int(image.size * 0.003))
-    mask = morphology.binary_dilation(mask, morphology.disk(3))
-
-    labels = measure.label(mask)
+    labels = measure.label(combined)
     regions = measure.regionprops(labels)
+
+    def bounds_from_profile(profile: Array2D) -> Tuple[int, int]:
+        thresh = max(np.percentile(profile, 60) * 0.6, profile.max() * 0.08)
+        active = np.where(profile > thresh)[0]
+        if len(active) == 0:
+            return 0, len(profile)
+        return int(active[0]), int(active[-1] + 1)
+
     if regions:
         main = max(regions, key=lambda r: r.area)
         minr, minc, maxr, maxc = main.bbox
-
-        # Combine the component bounds with the band estimates and keep generous padding.
-        pad = int(min(image.shape) * 0.05)
-        top = max(0, min(minr - pad, top))
-        bottom = min(image.shape[0], max(maxr + pad, bottom))
-        left = max(0, min(minc - pad, left))
-        right = min(image.shape[1], max(maxc + pad, right))
+        pad = int(min(image.shape) * 0.04)
+        top = max(0, minr - pad)
+        bottom = min(image.shape[0], maxr + pad)
+        left = max(0, minc - pad)
+        right = min(image.shape[1], maxc + pad)
     else:
-        # Fallback: retain original heuristic bounds if no component is found
-        blurred = filters.gaussian(norm, sigma=1.0)
-        row_activity = np.std(blurred, axis=1)
-        col_activity = np.std(blurred, axis=0)
-
-        def active_bounds(profile: Array2D) -> Tuple[int, int]:
-            thresh_local = max(np.percentile(profile, 60) * 0.6, profile.max() * 0.08)
-            active = np.where(profile > thresh_local)[0]
-            if len(active) == 0:
-                return 0, len(profile)
-            return int(active[0]), int(active[-1] + 1)
-
-        top, bottom = active_bounds(row_activity)
-        left, right = active_bounds(col_activity)
+        # Fallback to profile-based bounds when no dominant component is detected.
+        row_activity = np.std(smooth, axis=1)
+        col_activity = np.std(smooth, axis=0)
+        top, bottom = bounds_from_profile(row_activity)
+        left, right = bounds_from_profile(col_activity)
 
     if bottom - top < 5 or right - left < 5:
         top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
@@ -120,14 +95,15 @@ def ridge_enhance(image: Array2D) -> Array2D:
 
 def threshold_ridges(ridge_map: Array2D) -> Array2D:
     thresh = filters.threshold_otsu(ridge_map)
-    relaxed = max(thresh * 0.9, ridge_map.mean() + ridge_map.std() * 0.15)
+    relaxed = max(thresh * 0.88, ridge_map.mean() + ridge_map.std() * 0.12)
     mask = ridge_map > relaxed
-    clean = morphology.remove_small_objects(mask, min_size=12)
-    clean = morphology.remove_small_holes(clean, area_threshold=12)
+    clean = morphology.binary_closing(mask, morphology.disk(1))
+    clean = morphology.remove_small_objects(clean, min_size=8)
+    clean = morphology.remove_small_holes(clean, area_threshold=18)
     return clean
 
 
-def connect_gaps(binary: Array2D, max_dist: int = 10, angle_tol: float = 20) -> Array2D:
+def connect_gaps(binary: Array2D, max_dist: int = 25, angle_tol: float = 25) -> Array2D:
     skeleton = morphology.skeletonize(binary)
     coords = np.column_stack(np.nonzero(skeleton))
     if len(coords) == 0:
@@ -312,6 +288,7 @@ def process_image(uploaded: Image.Image):
     pre = preprocess(cropped)
     ridges = ridge_enhance(pre)
     mask = threshold_ridges(ridges)
+    mask = morphology.binary_dilation(mask, morphology.disk(1))
     bridged = connect_gaps(mask)
     skeleton = morphology.skeletonize(bridged)
     groups, segments = count_tubes(skeleton)
