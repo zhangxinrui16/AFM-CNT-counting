@@ -31,7 +31,7 @@ def preprocess(image: Array2D) -> Array2D:
 
 
 def ridge_enhance(image: Array2D) -> Array2D:
-    frangi = filters.frangi(image, scale_range=(1, 3), scale_step=1, beta1=0.5, beta2=15)
+    frangi = filters.frangi(image, scale_range=(1, 3), scale_step=1, beta=0.5, gamma=15)
     return exposure.rescale_intensity(frangi, out_range=(0.0, 1.0))
 
 
@@ -232,6 +232,18 @@ def process_image(uploaded: Image.Image):
     return grayscale, skeleton, groups, segments
 
 
+def running_in_streamlit() -> bool:
+    try:
+        from streamlit import runtime
+    except ImportError:
+        return False
+
+    try:
+        return runtime.exists()
+    except Exception:
+        return False
+
+
 def main():
     st.set_page_config(page_title="AFM CNT Density", layout="wide")
     st.title("AFM Carbon Nanotube Density Estimator")
@@ -285,7 +297,7 @@ if __name__ == "__main__":
     # Delegate to "streamlit run" when needed to bootstrap the runtime cleanly.
     import sys
 
-    if st._is_running_with_streamlit:
+    if running_in_streamlit():
         main()
     else:
         sys.argv = ["streamlit", "run", sys.argv[0]]
