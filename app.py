@@ -205,12 +205,16 @@ def visualize_detection(
     base = exposure.rescale_intensity(image, out_range=(0.0, 1.0))
     colors = plt.cm.get_cmap("tab20", len(groups) + 1)
 
+    # Plotly's Image trace expects a colormodel from an explicit channel array; expand grayscale to RGB
+    base_rgb = np.stack([base] * 3, axis=-1)
+    base_uint8 = (base_rgb * 255).astype(np.uint8)
+
     fig = go.Figure()
     # 使用 px.imshow 风格的底图以确保像素坐标与散点一致
     fig.add_trace(
         go.Image(
-            z=(base * 255).astype(np.uint8),
-            colormodel="gray",
+            z=base_uint8,
+            colormodel="rgb",
             hoverinfo="skip",
             name="AFM",
             opacity=0.9,
