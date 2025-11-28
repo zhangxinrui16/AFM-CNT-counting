@@ -21,24 +21,34 @@ def load_grayscale(image: Image.Image) -> Array2D:
 def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     """Automatically crop away outer text/legend margins.
 
-    The AFM scan usually sits inside a bright frame with text outside. We find
-    the largest dark rectangle wrapped by a white border, then fall back to a
-    high-frequency heuristic if the rectangle is too small.
+    The AFM scan typically sits as a darker rectangle inside a bright frame.
+    We locate the non-white area that is *not* reachable from the bright
+    background, keep the largest component as the scan, then trim residual
+    bright borders. A high-frequency fallback covers rare layouts.
     """
 
     norm = image / 255.0 if image.max() > 1 else image
-    smooth = filters.gaussian(norm, sigma=1.2)
+    smooth = filters.gaussian(norm, sigma=1.0)
 
-    # Detect non-white content and the surrounding white border.
-    non_white = smooth < 0.98
-    core = morphology.binary_closing(non_white, morphology.rectangle(5, 5))
-    core = morphology.remove_small_objects(core, min_size=int(image.size * 0.01))
+    # Identify bright background reachable from the borders (white frame + text area).
+    bright = smooth > 0.97
+    labels = measure.label(bright)
+    border_labels = set()
+    if labels.size:
+        border_labels.update(np.unique(labels[0, :]))
+        border_labels.update(np.unique(labels[-1, :]))
+        border_labels.update(np.unique(labels[:, 0]))
+        border_labels.update(np.unique(labels[:, -1]))
+    background = np.isin(labels, list(border_labels))
 
-    # Keep the largest dark region (AFM scan) and trim border pixels that are very bright.
-    labels = measure.label(core)
-    regions = measure.regionprops(labels)
-    if regions:
-        main = max(regions, key=lambda r: r.area)
+    # Content is what is not part of the bright background; filter to the main rectangle.
+    content = ~background
+    content = morphology.binary_closing(content, morphology.disk(2))
+    content = morphology.remove_small_objects(content, min_size=int(image.size * 0.003))
+    labels_c = measure.label(content)
+    regions_c = measure.regionprops(labels_c)
+    if regions_c:
+        main = max(regions_c, key=lambda r: r.area)
         minr, minc, maxr, maxc = main.bbox
         pad = int(min(image.shape) * 0.02)
         top, bottom = max(0, minr - pad), min(image.shape[0], maxr + pad)
@@ -46,7 +56,7 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     else:
         top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
 
-    # Trim bright margins hugging the rectangle to drop remaining legends.
+    # Trim any remaining bright border hugging the chosen rectangle.
     sub = smooth[top:bottom, left:right]
     row_mean = sub.mean(axis=1)
     col_mean = sub.mean(axis=0)
