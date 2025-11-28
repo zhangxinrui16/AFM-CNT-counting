@@ -60,46 +60,25 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     top, bottom = row_band
     left, right = col_band
 
-    thresh = max(np.percentile(energy, 70), energy.mean() + energy.std() * 0.5)
+    thresh = energy.mean() + energy.std() * 0.3
+    thresh = min(thresh, np.percentile(energy, 75))
     mask = energy > thresh
     mask = morphology.binary_closing(mask, morphology.disk(3))
-    mask = morphology.binary_opening(mask, morphology.disk(2))
-    mask = morphology.remove_small_objects(mask, min_size=int(image.size * 0.005))
-    mask = morphology.remove_small_holes(mask, area_threshold=int(image.size * 0.01))
+    mask = morphology.remove_small_objects(mask, min_size=int(image.size * 0.003))
+    mask = morphology.binary_dilation(mask, morphology.disk(3))
 
-    region_mask = mask[top:bottom, left:right]
-    labels = measure.label(region_mask)
+    labels = measure.label(mask)
     regions = measure.regionprops(labels)
     if regions:
         main = max(regions, key=lambda r: r.area)
         minr, minc, maxr, maxc = main.bbox
-        pad = 4
-        top = max(0, top + minr - pad)
-        bottom = min(image.shape[0], top + maxr + pad)
-        left = max(0, left + minc - pad)
-        right = min(image.shape[1], left + maxc + pad)
 
-        refined = mask[top:bottom, left:right]
-        row_fill = refined.sum(axis=1) / refined.shape[1]
-        col_fill = refined.sum(axis=0) / refined.shape[0]
-
-        def trim_bounds(fill_profile: Array2D, start: int, end: int) -> Tuple[int, int]:
-            if fill_profile.max() == 0:
-                return start, end
-            cutoff = fill_profile.max() * 0.25
-            while start < end and fill_profile[start] < cutoff:
-                start += 1
-            while end > start and fill_profile[end - 1] < cutoff:
-                end -= 1
-            return start, end
-
-        top_trim, bottom_trim = trim_bounds(row_fill, 0, len(row_fill))
-        left_trim, right_trim = trim_bounds(col_fill, 0, len(col_fill))
-
-        top += top_trim
-        bottom = top + (bottom_trim - top_trim)
-        left += left_trim
-        right = left + (right_trim - left_trim)
+        # Combine the component bounds with the band estimates and keep generous padding.
+        pad = int(min(image.shape) * 0.05)
+        top = max(0, min(minr - pad, top))
+        bottom = min(image.shape[0], max(maxr + pad, bottom))
+        left = max(0, min(minc - pad, left))
+        right = min(image.shape[1], max(maxc + pad, right))
     else:
         # Fallback: retain original heuristic bounds if no component is found
         blurred = filters.gaussian(norm, sigma=1.0)
@@ -129,7 +108,8 @@ def preprocess(image: Array2D) -> Array2D:
         in_range=(np.percentile(image, 1), np.percentile(image, 99)),
         out_range=(0.0, 1.0),
     )
-    blurred = filters.gaussian(rescaled, sigma=1.0)
+    enhanced = exposure.equalize_adapthist(rescaled, clip_limit=0.02)
+    blurred = filters.gaussian(enhanced, sigma=0.8)
     return np.clip(blurred, 0.0, 1.0)
 
 
@@ -140,13 +120,14 @@ def ridge_enhance(image: Array2D) -> Array2D:
 
 def threshold_ridges(ridge_map: Array2D) -> Array2D:
     thresh = filters.threshold_otsu(ridge_map)
-    mask = ridge_map > thresh
-    clean = morphology.remove_small_objects(mask, min_size=30)
-    clean = morphology.remove_small_holes(clean, area_threshold=30)
+    relaxed = max(thresh * 0.9, ridge_map.mean() + ridge_map.std() * 0.15)
+    mask = ridge_map > relaxed
+    clean = morphology.remove_small_objects(mask, min_size=12)
+    clean = morphology.remove_small_holes(clean, area_threshold=12)
     return clean
 
 
-def connect_gaps(binary: Array2D, max_dist: int = 8, angle_tol: float = 20) -> Array2D:
+def connect_gaps(binary: Array2D, max_dist: int = 10, angle_tol: float = 20) -> Array2D:
     skeleton = morphology.skeletonize(binary)
     coords = np.column_stack(np.nonzero(skeleton))
     if len(coords) == 0:
