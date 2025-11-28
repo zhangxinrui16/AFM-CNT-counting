@@ -21,55 +21,51 @@ def load_grayscale(image: Image.Image) -> Array2D:
 def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     """Automatically crop away outer text/legend margins.
 
-    The AFM scan typically sits inside a bright rectangular frame; we seek the
-    darkest rectangle bounded by white borders. A profile-based locator finds
-    the longest band of non-white rows/cols and trims bright borders, while a
-    high-frequency rescue falls back to the prior heuristic when needed.
+    The AFM scan usually sits inside a bright frame with text outside. We find
+    the largest dark rectangle wrapped by a white border, then fall back to a
+    high-frequency heuristic if the rectangle is too small.
     """
 
     norm = image / 255.0 if image.max() > 1 else image
-    smooth = filters.gaussian(norm, sigma=1.0)
+    smooth = filters.gaussian(norm, sigma=1.2)
 
-    def longest_run(mask: Array2D) -> Tuple[int, int]:
-        start = None
-        best = (0, 0)
-        for idx, val in enumerate(mask):
-            if val and start is None:
-                start = idx
-            if (not val or idx == len(mask) - 1) and start is not None:
-                end_idx = idx + 1 if val and idx == len(mask) - 1 else idx
-                if end_idx - start > best[1] - best[0]:
-                    best = (start, end_idx)
-                start = None
-        if best[1] == 0:
-            return 0, len(mask)
-        return best
+    # Detect non-white content and the surrounding white border.
+    non_white = smooth < 0.98
+    core = morphology.binary_closing(non_white, morphology.rectangle(5, 5))
+    core = morphology.remove_small_objects(core, min_size=int(image.size * 0.01))
 
-    # Locate the dominant dark band in rows/cols (non-white content).
-    row_activity = (smooth < 0.97).mean(axis=1)
-    col_activity = (smooth < 0.97).mean(axis=0)
-    row_run = longest_run(row_activity > 0.01)
-    col_run = longest_run(col_activity > 0.01)
+    # Keep the largest dark region (AFM scan) and trim border pixels that are very bright.
+    labels = measure.label(core)
+    regions = measure.regionprops(labels)
+    if regions:
+        main = max(regions, key=lambda r: r.area)
+        minr, minc, maxr, maxc = main.bbox
+        pad = int(min(image.shape) * 0.02)
+        top, bottom = max(0, minr - pad), min(image.shape[0], maxr + pad)
+        left, right = max(0, minc - pad), min(image.shape[1], maxc + pad)
+    else:
+        top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
 
-    top, bottom = row_run
-    left, right = col_run
-
-    # Trim away any residual white borders hugging the edges.
+    # Trim bright margins hugging the rectangle to drop remaining legends.
+    sub = smooth[top:bottom, left:right]
+    row_mean = sub.mean(axis=1)
+    col_mean = sub.mean(axis=0)
     bright_thresh = 0.985
-    row_mean = smooth.mean(axis=1)
-    col_mean = smooth.mean(axis=0)
-    while top < bottom - 1 and row_mean[top] > bright_thresh:
+    while top < bottom - 1 and row_mean[0] > bright_thresh:
         top += 1
-    while bottom - 1 > top and row_mean[bottom - 1] > bright_thresh:
+        row_mean = sub.mean(axis=1)
+    while bottom - 1 > top and row_mean[-1] > bright_thresh:
         bottom -= 1
-    while left < right - 1 and col_mean[left] > bright_thresh:
+        row_mean = sub.mean(axis=1)
+    while left < right - 1 and col_mean[0] > bright_thresh:
         left += 1
-    while right - 1 > left and col_mean[right - 1] > bright_thresh:
+        col_mean = sub.mean(axis=0)
+    while right - 1 > left and col_mean[-1] > bright_thresh:
         right -= 1
+        col_mean = sub.mean(axis=0)
 
-    # Guardrail: ensure the run is sufficiently large; otherwise fall back.
-    min_height = int(image.shape[0] * 0.25)
-    min_width = int(image.shape[1] * 0.25)
+    min_height = int(image.shape[0] * 0.2)
+    min_width = int(image.shape[1] * 0.2)
 
     def heuristic_crop() -> Tuple[int, int, int, int]:
         content_mask = smooth < 0.94
@@ -91,24 +87,23 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
             combined, min_size=int(image.size * 0.003)
         )
 
-        labels = measure.label(combined)
-        regions = measure.regionprops(labels)
-        if not regions:
+        labels_h = measure.label(combined)
+        regions_h = measure.regionprops(labels_h)
+        if not regions_h:
             return 0, image.shape[0], 0, image.shape[1]
 
-        main = max(regions, key=lambda r: r.area)
-        minr, minc, maxr, maxc = main.bbox
-        pad = int(min(image.shape) * 0.04)
-        top_h = max(0, minr - pad)
-        bottom_h = min(image.shape[0], maxr + pad)
-        left_h = max(0, minc - pad)
-        right_h = min(image.shape[1], maxc + pad)
+        main_h = max(regions_h, key=lambda r: r.area)
+        minr, minc, maxr, maxc = main_h.bbox
+        pad_h = int(min(image.shape) * 0.04)
+        top_h = max(0, minr - pad_h)
+        bottom_h = min(image.shape[0], maxr + pad_h)
+        left_h = max(0, minc - pad_h)
+        right_h = min(image.shape[1], maxc + pad_h)
         return top_h, bottom_h, left_h, right_h
 
     if (bottom - top) < min_height or (right - left) < min_width:
         top, bottom, left, right = heuristic_crop()
 
-    # Final sanity to avoid degenerate crops.
     if bottom - top < 5 or right - left < 5:
         top, bottom, left, right = 0, image.shape[0], 0, image.shape[1]
 
@@ -127,6 +122,19 @@ def preprocess(image: Array2D) -> Array2D:
     return np.clip(blurred, 0.0, 1.0)
 
 
+def base_contrast_mask(image: Array2D) -> Array2D:
+    """Highlight pixels deviating from the flat background to catch faint CNTs."""
+
+    bg = filters.gaussian(image, sigma=6.0)
+    residual = image - bg
+    pos_res = np.clip(residual, 0.0, None)
+    thresh = max(np.percentile(pos_res, 85), pos_res.mean() + pos_res.std() * 0.5)
+    mask = pos_res > thresh
+    mask = morphology.binary_closing(mask, morphology.disk(1))
+    mask = morphology.remove_small_objects(mask, min_size=6)
+    return mask
+
+
 def ridge_enhance(image: Array2D) -> Array2D:
     frangi = filters.frangi(image, scale_range=(1, 3), scale_step=1, beta=0.5, gamma=15)
     return exposure.rescale_intensity(frangi, out_range=(0.0, 1.0))
@@ -138,12 +146,12 @@ def threshold_ridges(ridge_map: Array2D) -> Array2D:
     mask = ridge_map > relaxed
     clean = morphology.binary_opening(mask, morphology.disk(1))
     clean = morphology.binary_closing(clean, morphology.disk(1))
-    clean = morphology.remove_small_objects(clean, min_size=12)
-    clean = morphology.remove_small_holes(clean, area_threshold=20)
+    clean = morphology.remove_small_objects(clean, min_size=8)
+    clean = morphology.remove_small_holes(clean, area_threshold=16)
     return clean
 
 
-def connect_gaps(binary: Array2D, max_dist: int = 35, angle_tol: float = 25) -> Array2D:
+def connect_gaps(binary: Array2D, max_dist: int = 45, angle_tol: float = 30) -> Array2D:
     skeleton = morphology.skeletonize(binary)
     coords = np.column_stack(np.nonzero(skeleton))
     if len(coords) == 0:
@@ -336,8 +344,9 @@ def process_image(uploaded: Image.Image):
     cropped, _ = crop_afm_region(grayscale)
     pre = preprocess(cropped)
     ridges = ridge_enhance(pre)
-    mask = threshold_ridges(ridges)
-    mask = morphology.binary_dilation(mask, morphology.disk(1))
+    ridge_mask = threshold_ridges(ridges)
+    contrast_mask = base_contrast_mask(pre)
+    mask = morphology.binary_dilation(ridge_mask | contrast_mask, morphology.disk(1))
     bridged = connect_gaps(mask)
     skeleton = morphology.skeletonize(bridged)
     groups, segments = count_tubes(skeleton)
