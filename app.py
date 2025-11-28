@@ -264,6 +264,7 @@ def main():
 
     image = Image.open(uploaded_file)
     grayscale, skeleton, groups, segments = process_image(image)
+    display_gray = np.clip(grayscale / 255.0 if grayscale.max() > 1 else grayscale, 0.0, 1.0)
 
     area = length_um * width_um
     tube_count = len(groups)
@@ -272,7 +273,7 @@ def main():
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("原始灰度图")
-        st.image(grayscale, caption="输入图像灰度", use_container_width=True)
+        st.image(display_gray, caption="输入图像灰度", use_container_width=True)
         st.markdown(
             f"**面积：** {area:.3f} μm²  |  **根数：** {tube_count}  |  **密度：** {density:.2f} 根/μm²"
         )
