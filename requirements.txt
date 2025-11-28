@@ -1,0 +1,6 @@
+streamlit
+numpy
+pillow
+matplotlib
+scikit-image
+networkx
