@@ -199,37 +199,53 @@ def count_tubes(skeleton: Array2D):
     return merged_groups, segments
 
 
-def visualize_detection(image: Array2D, skeleton: Array2D, groups: List[List[int]], segments: List[List[Tuple[int, int]]]):
+def visualize_detection(
+    image: Array2D, skeleton: Array2D, groups: List[List[int]], segments: List[List[Tuple[int, int]]]
+):
     base = exposure.rescale_intensity(image, out_range=(0.0, 1.0))
     colors = plt.cm.get_cmap("tab20", len(groups) + 1)
 
     fig = go.Figure()
-    fig.add_trace(go.Image(z=(base * 255).astype(np.uint8)))
+    # 使用 px.imshow 风格的底图以确保像素坐标与散点一致
+    fig.add_trace(
+        go.Image(
+            z=(base * 255).astype(np.uint8),
+            colormodel="gray",
+            hoverinfo="skip",
+            name="AFM",
+            opacity=0.9,
+        )
+    )
 
     for gid, seg_indices in enumerate(groups):
         xs: List[float] = []
         ys: List[float] = []
         for idx in seg_indices:
             seg = segments[idx]
+            if len(seg) == 0:
+                continue
             ys.extend([p[0] for p in seg])
             xs.extend([p[1] for p in seg])
             ys.append(np.nan)
             xs.append(np.nan)
 
-        rgb = tuple((np.array(colors(gid)[:3]) * 255).astype(int))
-        color_str = f"rgb{rgb}"
+        if not xs:
+            continue
+
+        rgb_vals = [int(v) for v in np.round(np.array(colors(gid)[:3]) * 255)]
+        color_str = f"rgb({rgb_vals[0]},{rgb_vals[1]},{rgb_vals[2]})"
         fig.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=xs,
                 y=ys,
                 mode="lines+markers",
-                line=dict(color=color_str, width=3),
-                marker=dict(color=color_str, size=5, line=dict(width=1, color="white")),
+                line=dict(color=color_str, width=4),
+                marker=dict(color=color_str, size=6, line=dict(width=1, color="white")),
                 hovertemplate="<b>碳纳米管 %{customdata}</b><extra></extra>",
                 name=f"Tube {gid + 1}",
                 customdata=np.full(len(xs), gid + 1),
                 hoverlabel=dict(bgcolor=color_str, font=dict(color="white")),
-                opacity=0.9,
+                opacity=0.95,
             )
         )
 
@@ -237,7 +253,7 @@ def visualize_detection(image: Array2D, skeleton: Array2D, groups: List[List[int
         title="检测结果（悬停高亮单根碳纳米管）",
         margin=dict(l=0, r=0, t=40, b=0),
         hovermode="closest",
-        xaxis=dict(showgrid=False, visible=False),
+        xaxis=dict(showgrid=False, visible=False, constrain="domain"),
         yaxis=dict(showgrid=False, visible=False, scaleanchor="x", autorange="reversed"),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
