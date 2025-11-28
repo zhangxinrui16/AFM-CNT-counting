@@ -232,15 +232,6 @@ def process_image(uploaded: Image.Image):
     return grayscale, skeleton, groups, segments
 
 
-def running_in_streamlit() -> bool:
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-    except ImportError:
-        return False
-
-    return get_script_run_ctx() is not None
-
-
 def main():
     st.set_page_config(page_title="AFM CNT Density", layout="wide")
     st.title("AFM Carbon Nanotube Density Estimator")
@@ -294,7 +285,7 @@ if __name__ == "__main__":
     # Delegate to "streamlit run" when needed to bootstrap the runtime cleanly.
     import sys
 
-    if running_in_streamlit():
+    if st._is_running_with_streamlit:
         main()
     else:
         sys.argv = ["streamlit", "run", sys.argv[0]]
