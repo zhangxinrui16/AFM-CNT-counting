@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from PIL import Image
 import streamlit as st
 from streamlit.web import cli as stcli
-from skimage import exposure, filters, morphology, util
+from skimage import exposure, filters, measure, morphology, util
 from skimage.draw import line as draw_line
 
 Array2D = np.ndarray
@@ -29,21 +29,44 @@ def crop_afm_region(image: Array2D) -> Tuple[Array2D, Tuple[slice, slice]]:
     """
 
     norm = image / 255.0 if image.max() > 1 else image
-    blurred = filters.gaussian(norm, sigma=1.0)
-    row_activity = np.std(blurred, axis=1)
-    col_activity = np.std(blurred, axis=0)
 
-    def active_bounds(profile: Array2D) -> Tuple[int, int]:
-        # Use a robust threshold to tolerate bright legends while retaining the
-        # high-variance scan area. Fallback to full span if detection fails.
-        thresh = max(np.percentile(profile, 60) * 0.6, profile.max() * 0.08)
-        active = np.where(profile > thresh)[0]
-        if len(active) == 0:
-            return 0, len(profile)
-        return int(active[0]), int(active[-1] + 1)
+    # Use high-frequency energy + gradient to highlight textured scan regions
+    # while keeping legend text (narrow, low-area) suppressed.
+    highpass = norm - filters.gaussian(norm, sigma=2.5)
+    energy = np.abs(highpass) + filters.sobel(norm)
+    energy = exposure.rescale_intensity(energy, out_range=(0.0, 1.0))
 
-    top, bottom = active_bounds(row_activity)
-    left, right = active_bounds(col_activity)
+    thresh = max(np.percentile(energy, 75), energy.mean() + energy.std() * 0.5)
+    mask = energy > thresh
+    mask = morphology.binary_closing(mask, morphology.disk(3))
+    mask = morphology.remove_small_objects(mask, min_size=int(image.size * 0.005))
+    mask = morphology.remove_small_holes(mask, area_threshold=int(image.size * 0.01))
+
+    labels = measure.label(mask)
+    regions = measure.regionprops(labels)
+    if regions:
+        main = max(regions, key=lambda r: r.area)
+        minr, minc, maxr, maxc = main.bbox
+        pad = 4
+        top = max(0, minr - pad)
+        bottom = min(image.shape[0], maxr + pad)
+        left = max(0, minc - pad)
+        right = min(image.shape[1], maxc + pad)
+    else:
+        # Fallback: retain original heuristic bounds if no component is found
+        blurred = filters.gaussian(norm, sigma=1.0)
+        row_activity = np.std(blurred, axis=1)
+        col_activity = np.std(blurred, axis=0)
+
+        def active_bounds(profile: Array2D) -> Tuple[int, int]:
+            thresh_local = max(np.percentile(profile, 60) * 0.6, profile.max() * 0.08)
+            active = np.where(profile > thresh_local)[0]
+            if len(active) == 0:
+                return 0, len(profile)
+            return int(active[0]), int(active[-1] + 1)
+
+        top, bottom = active_bounds(row_activity)
+        left, right = active_bounds(col_activity)
 
     cropped = image[top:bottom, left:right]
     return cropped, (slice(top, bottom), slice(left, right))
