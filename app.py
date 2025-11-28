@@ -27,7 +27,7 @@ def preprocess(image: Array2D) -> Array2D:
         out_range=(0.0, 1.0),
     )
     blurred = filters.gaussian(rescaled, sigma=1.0)
-    return blurred
+    return np.clip(blurred, 0.0, 1.0)
 
 
 def ridge_enhance(image: Array2D) -> Array2D:
@@ -102,9 +102,9 @@ def build_graph(skeleton: Array2D) -> nx.Graph:
             for dx in (-1, 0, 1):
                 if dy == 0 and dx == 0:
                     continue
-                ny, nx = y + dy, x + dx
-                if (ny, nx) in g:
-                    g.add_edge((y, x), (ny, nx))
+                ny, nx_coord = y + dy, x + dx
+                if (ny, nx_coord) in g:
+                    g.add_edge((y, x), (ny, nx_coord))
     return g
 
 
@@ -272,14 +272,14 @@ def main():
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("原始灰度图")
-        st.image(grayscale, caption="输入图像灰度", use_column_width=True)
+        st.image(grayscale, caption="输入图像灰度", use_container_width=True)
         st.markdown(
             f"**面积：** {area:.3f} μm²  |  **根数：** {tube_count}  |  **密度：** {density:.2f} 根/μm²"
         )
     with col2:
         vis_buf = visualize_detection(grayscale, skeleton, groups, segments)
         st.subheader("检测结果")
-        st.image(vis_buf, caption="碳纳米管提取与计数", use_column_width=True)
+        st.image(vis_buf, caption="碳纳米管提取与计数", use_container_width=True)
 
     with st.expander("算法要点"):
         st.markdown(
